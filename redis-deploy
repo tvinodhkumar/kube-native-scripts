@@ -1,0 +1,115 @@
+#!/bin/bash
+
+DOCKER_IMAGE_NAME=vinodtest/ctredis
+REVISION=0.0.1
+CLOUD=$4
+CHART_NAME="redis"
+RELEASE_NAME="redis"
+NAMESPACE="redis"
+source ../../validate_input.sh
+ENV=$3
+CLUSTERNAME=$2
+
+function stop() {
+    DOCKER_IMAGE_ID=`docker images -a | grep ${DOCKER_IMAGE_NAME} | awk '{print $3}'`
+    if [ ! -z ${DOCKER_IMAGE_ID} ]; then
+        for i in $(docker ps -a | grep ${DOCKER_IMAGE_NAME}|awk '{print $1}')
+            do
+                docker stop $i
+            done
+    fi
+}
+
+function clean() {
+    for i in $(docker ps -a | grep ${DOCKER_IMAGE_NAME} | awk '{print $1}')
+        do
+            docker stop $i
+            docker rm $i
+        done
+
+    for i in $(docker images | grep ${DOCKER_IMAGE_NAME} | awk '{print $3}')
+        do
+            docker rmi -f $i
+        done | sort -u
+}
+
+function build() {
+    clean
+    source ../../Support/checkDockerLoginHelper.sh
+    checkDockerLogin
+    docker pull ${DOCKER_IMAGE_NAME}:${REVISION}
+    source ../../Support/checkDockerImageHelper.sh 
+    checkDockerImage ${DOCKER_IMAGE_NAME} ${REVISION}
+    if [[ $? != 0 ]];then
+        exit 1
+    fi
+}
+
+function run() {
+    mkdir manifests
+    helm template --set image.tag=$REVISION --namespace ${NAMESPACE} --name ${RELEASE_NAME} --values ${CHART_NAME}/values/${CLOUD}/values.$ENV.yaml --output-dir ./manifests ${CHART_NAME}
+    kubectl apply --dry-run --validate --recursive --filename ./manifests/${CHART_NAME}
+    checkForErrors $? "Deployment for ${RELEASE_NAME} is not deployment ready"
+    kubectl create ns ${NAMESPACE}
+    sleep 5
+    kubectl create secret docker-registry vinodtest-docker-hub-secret --docker-server="https://index.docker.io/v1/" --docker-username="vinodrepouser" --docker-password="mypassword!" --docker-email="test@vinodrepo.com" -n ${NAMESPACE}
+    kubectl apply --recursive --filename ./manifests/${CHART_NAME}
+    checkForErrors $? "Deployment for ${RELEASE_NAME} has failed." "Deployment for ${RELEASE_NAME} is successful"
+    rm -rf ./manifests
+    echo "Deployment for ${RELEASE_NAME} is completed."
+}
+
+function unrun() {
+    mkdir manifests
+    helm template --set image.tag=$REVISION --namespace ${NAMESPACE} --name ${RELEASE_NAME} --values ${CHART_NAME}/values/${CLOUD}/values.$ENV.yaml --output-dir ./manifests ${CHART_NAME}
+    kubectl delete secret vinodrepo-docker-hub-secret -n ${NAMESPACE}
+    kubectl delete --recursive --filename ./manifests/${CHART_NAME}
+    sleep 5
+    kubectl delete ns ${NAMESPACE}
+    rm -rf ./manifests/${CHART_NAME}
+    checkForErrors $? "Deployment for ${RELEASE_NAME} has failed." "Deployment deletion for ${RELEASE_NAME} is successful"
+}
+
+function push() {
+    source ../../Support/checkDockerImageHelper.sh 
+    checkDockerImage ${DOCKER_IMAGE_NAME} ${REVISION}
+    source ../../Support/checkDockerLoginHelper.sh
+    checkDockerLogin
+    DOCKER_IMAGE_ID=`docker images -a | grep ${DOCKER_IMAGE_NAME} | grep ${REVISION} | awk '{print $3}'`
+    docker tag ${DOCKER_IMAGE_ID} ${DOCKER_IMAGE_NAME}:${REVISION}
+    docker push ${DOCKER_IMAGE_NAME}:${REVISION}
+}
+
+function shell() {
+    docker run \
+      -t -i \
+      ${DOCKER_IMAGE_NAME}:${REVISION} \
+      /bin/bash
+}
+
+function help() {
+    echo "build - to build docker images"
+    echo "run - to create docker containers"
+    echo "stop - to stop docker containers"
+    echo "push - to push images to docker hub. Docker login is required"
+    echo "unrun - to delete docker containers"
+    echo "clean - to delete docker images"
+    echo "shell - to ssh into docker image"
+}
+
+case "${1}"
+in
+    ("build") build ;;
+    ("clean") clean ;;
+    ("push") push ;;
+    ("shell") shell ;;
+    ("stop") stop ;;
+    ("run")
+	    validateClusterName $CLUSTERNAME
+	    run ;;
+    ("unrun")
+	    validateClusterName $CLUSTERNAME
+	    unrun ;;
+    ("help") help ;;
+    (*) echo "$0 [build|shell|clean|stop|push|run <clustername> <env>|unrun <clustername> |help]" ;;
+esac
